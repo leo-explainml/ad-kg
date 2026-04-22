@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 import anthropic
@@ -15,7 +16,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from ad_kg.config import ANTHROPIC_API_KEY, RELATION_EXTRACTION_MAX_PAPERS
+from ad_kg.config import ANTHROPIC_API_KEY, DATA_DIR, RELATION_EXTRACTION_MAX_PAPERS
 from ad_kg.models import Paper
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,21 @@ Output ONLY a valid JSON array with objects of this shape:
 
 If no clear triples can be extracted, return an empty array: []
 Do not include any text outside the JSON array."""
+
+
+def _cache_path(pmid: str) -> Path:
+    d = DATA_DIR / "cache" / "relations"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{pmid}.json"
+
+
+def _load_cached(pmid: str) -> list[dict[str, Any]] | None:
+    p = _cache_path(pmid)
+    return json.loads(p.read_text()) if p.exists() else None
+
+
+def _save_cached(pmid: str, triples: list[dict[str, Any]]) -> None:
+    _cache_path(pmid).write_text(json.dumps(triples))
 
 
 def _get_client() -> anthropic.Anthropic:
@@ -160,19 +176,28 @@ def extract_relations_llm(
     """
     client = _get_client()
     papers_to_process = papers[:max_papers]
+
+    # Load cached results; only call Claude for papers not yet processed.
+    all_relations: list[dict[str, Any]] = []
+    uncached: list[Paper] = []
+    for paper in papers_to_process:
+        cached = _load_cached(paper.pmid)
+        if cached is not None:
+            all_relations.extend(cached)
+        else:
+            uncached.append(paper)
+
     logger.info(
-        "Extracting relations from %d papers (limit=%d)",
-        len(papers_to_process),
+        "Extracting relations: %d cached, %d need API calls (limit=%d)",
+        len(papers_to_process) - len(uncached),
+        len(uncached),
         max_papers,
     )
 
-    all_relations: list[dict[str, Any]] = []
-    batch_size = 5  # Process papers in small batches to reduce API calls
+    batch_size = 5
+    for batch_start in range(0, len(uncached), batch_size):
+        batch = uncached[batch_start : batch_start + batch_size]
 
-    for batch_start in range(0, len(papers_to_process), batch_size):
-        batch = papers_to_process[batch_start : batch_start + batch_size]
-
-        # Build user message with batch of abstracts
         abstract_parts: list[str] = []
         paper_ids: list[str] = []
 
@@ -206,6 +231,11 @@ def extract_relations_llm(
         try:
             raw_output = _call_claude(client, user_message)
             triples = _parse_triples(raw_output, paper_ids)
+            # Save each PMID's triples to disk before extending all_relations
+            # so a crash mid-run doesn't lose completed work.
+            for pmid in paper_ids:
+                pmid_triples = [t for t in triples if t["paper_id"] == pmid]
+                _save_cached(pmid, pmid_triples)
             all_relations.extend(triples)
             logger.debug("Extracted %d triples from batch", len(triples))
         except anthropic.RateLimitError as exc:

@@ -20,6 +20,9 @@ htmlcov/
 data/*
 !data/.gitkeep
 
+# Claude API response cache
+data/cache/
+
 # Neo4j dumps
 *.dump
 
