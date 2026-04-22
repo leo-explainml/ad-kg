@@ -106,3 +106,17 @@ ANTHROPIC_API_KEY=sk-ant-...     # Required for relation extraction
 NCBI_API_KEY=...                 # Optional, increases rate limit 3x
 NEO4J_PASSWORD=...               # Match docker-compose.yml
 ```
+
+## Live Instance
+
+A public read-only instance of the knowledge graph is running on Neo4j AuraDB.
+To request access for querying or exploration, open a [GitHub issue](https://github.com/leo-explainml/ad-kg/issues) or reach out by email (see below).
+
+The graph is periodically refreshed as new PubMed, GWAS, and FAERS data becomes available.
+
+## Collaboration
+
+This project is maintained by Leonardo Apolonio. If you are a researcher, clinician, or engineer working on Alzheimer's disease, drug repurposing, or biomedical knowledge graphs and want to collaborate — whether to extend the pipeline, add new data sources, or use the graph in your own work — get in touch.
+
+- **GitHub Issues:** feature requests, bug reports, data questions
+- **Email:** blazinazin215@gmail.com
