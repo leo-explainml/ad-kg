@@ -84,6 +84,7 @@ class FAERSReport:
     ci_lower: float
     ci_upper: float
     report_count: int
+    cohort: str = "all"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

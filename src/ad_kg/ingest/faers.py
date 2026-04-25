@@ -27,6 +27,8 @@ _DEFAULT_DRUGS = [
     "exenatide",
     "dulaglutide",
     "tirzepatide",
+    "albiglutide",    # appeared in gwas_snp_to_drug via GLP1R
+    "lixisenatide",   # appeared in gwas_snp_to_drug via GLP1R
     # Biguanides
     "metformin",
     # SGLT2 inhibitors
@@ -34,6 +36,8 @@ _DEFAULT_DRUGS = [
     "dapagliflozin",
     "canagliflozin",
     "ertugliflozin",
+    # Thiazolidinediones — PPARG agonists with GWAS bridge gene support and AD biology
+    "pioglitazone",
 ]
 
 # MedDRA terms associated with Alzheimer's / cognitive impairment
@@ -45,6 +49,16 @@ _AD_REACTIONS = [
     "Dementia Alzheimer's type",
     "Cognitive impairment",
 ]
+
+# Cohorts for sensitivity analysis.
+# Each value is an OpenFDA Lucene filter appended to the base search query.
+# "all" = no filter (baseline ROR); others restrict the reporting population.
+_COHORTS: dict[str, str | None] = {
+    "all": None,
+    "t2dm": 'patient.drug.drugindication:"type 2 diabetes mellitus"',
+    "elderly": "patient.patientagegroup:6",
+    "post_2020": "receivedate:[20200101 TO 20991231]",
+}
 
 
 @retry(
@@ -82,11 +96,17 @@ def compute_ror(a: int, b: int, c: int, d: int) -> tuple[float, float, float]:
     return math.exp(log_ror), math.exp(log_lower), math.exp(log_upper)
 
 
-def _count_reports(drug: str, reaction: str | None = None) -> int:
-    """Count FDA adverse event reports for a drug (+ optional reaction)."""
+def _count_reports(
+    drug: str,
+    reaction: str | None = None,
+    cohort_filter: str | None = None,
+) -> int:
+    """Count FDA adverse event reports for a drug (+ optional reaction and cohort filter)."""
     search_parts = [f'patient.drug.medicinalproduct:"{drug}"']
     if reaction:
         search_parts.append(f'patient.reaction.reactionmeddrapt:"{reaction}"')
+    if cohort_filter:
+        search_parts.append(cohort_filter)
     params: dict[str, Any] = {
         "search": " AND ".join(search_parts),
         "limit": 1,
@@ -99,15 +119,20 @@ def _count_reports(drug: str, reaction: str | None = None) -> int:
         return 0
 
 
-def _count_all_drug_reports(drug: str) -> int:
+def _count_all_drug_reports(drug: str, cohort_filter: str | None = None) -> int:
     """Total reports for a drug regardless of reaction."""
-    return _count_reports(drug)
+    return _count_reports(drug, cohort_filter=cohort_filter)
 
 
-def _count_total_reports_with_reaction(reaction: str) -> int:
+def _count_total_reports_with_reaction(
+    reaction: str, cohort_filter: str | None = None
+) -> int:
     """Total reports with a given reaction regardless of drug."""
+    search_parts = [f'patient.reaction.reactionmeddrapt:"{reaction}"']
+    if cohort_filter:
+        search_parts.append(cohort_filter)
     params: dict[str, Any] = {
-        "search": f'patient.reaction.reactionmeddrapt:"{reaction}"',
+        "search": " AND ".join(search_parts),
         "limit": 1,
     }
     try:
@@ -118,9 +143,11 @@ def _count_total_reports_with_reaction(reaction: str) -> int:
         return 0
 
 
-def _count_total_reports() -> int:
-    """Approximate total number of reports in the database."""
+def _count_total_reports(cohort_filter: str | None = None) -> int:
+    """Approximate total number of reports in the database (optionally filtered to a cohort)."""
     params: dict[str, Any] = {"limit": 1}
+    if cohort_filter:
+        params["search"] = cohort_filter
     try:
         data = _fda_get(params)
         return data.get("meta", {}).get("results", {}).get("total", 10_000_000)
@@ -128,60 +155,65 @@ def _count_total_reports() -> int:
         return 10_000_000
 
 
-def ingest_faers(drug_list: list[str] | None = None) -> list[FAERSReport]:
-    """Ingest FAERS data and compute ROR for AD-related reactions.
+def ingest_faers(
+    drug_list: list[str] | None = None,
+    cohorts: dict[str, str | None] | None = None,
+) -> list[FAERSReport]:
+    """Ingest FAERS data and compute ROR for AD-related reactions across cohorts.
 
     Args:
         drug_list: Drug names to query. Defaults to GLP-1/metformin/SGLT2 list.
+        cohorts: Dict of cohort_name -> OpenFDA search filter. Defaults to
+            _COHORTS (all, t2dm, elderly, post_2020).
 
     Returns:
-        List of FAERSReport objects with computed ROR.
+        List of FAERSReport objects with computed ROR, one per drug/reaction/cohort.
     """
     if drug_list is None:
         drug_list = _DEFAULT_DRUGS
+    if cohorts is None:
+        cohorts = _COHORTS
 
-    logger.info("Fetching FAERS for %d drugs", len(drug_list))
-    total_reports = _count_total_reports()
+    logger.info("Fetching FAERS for %d drugs × %d cohorts", len(drug_list), len(cohorts))
     reports: list[FAERSReport] = []
 
-    for drug in drug_list:
-        logger.info("Processing FAERS for drug=%r", drug)
-        drug_total = _count_all_drug_reports(drug)
+    for cohort_name, cohort_filter in cohorts.items():
+        logger.info("Cohort: %s", cohort_name)
+        total_reports = _count_total_reports(cohort_filter)
 
-        for reaction in _AD_REACTIONS:
-            a = _count_reports(drug, reaction)  # drug + AD reaction
-            if a == 0:
-                continue
+        for drug in drug_list:
+            logger.info("  drug=%r cohort=%s", drug, cohort_name)
+            drug_total = _count_all_drug_reports(drug, cohort_filter)
 
-            c = _count_total_reports_with_reaction(reaction)  # all + AD reaction
-            b = drug_total - a  # drug + not-AD
-            d = total_reports - drug_total - c + a  # not-drug + not-AD
+            for reaction in _AD_REACTIONS:
+                a = _count_reports(drug, reaction, cohort_filter)
+                if a == 0:
+                    continue
 
-            # Guard against nonsensical counts
-            b = max(b, 0)
-            d = max(d, 0)
+                c = _count_total_reports_with_reaction(reaction, cohort_filter)
+                b = drug_total - a
+                d = total_reports - drug_total - c + a
 
-            ror, ci_lower, ci_upper = compute_ror(a, b, c, d)
+                b = max(b, 0)
+                d = max(d, 0)
 
-            reports.append(
-                FAERSReport(
-                    drug_name=drug,
-                    reaction=reaction,
-                    ror=ror,
-                    ci_lower=ci_lower,
-                    ci_upper=ci_upper,
-                    report_count=a,
+                ror, ci_lower, ci_upper = compute_ror(a, b, c, d)
+
+                reports.append(
+                    FAERSReport(
+                        drug_name=drug,
+                        reaction=reaction,
+                        ror=ror,
+                        ci_lower=ci_lower,
+                        ci_upper=ci_upper,
+                        report_count=a,
+                        cohort=cohort_name,
+                    )
                 )
-            )
-            logger.debug(
-                "  %s / %s: a=%d ROR=%.3f [%.3f, %.3f]",
-                drug,
-                reaction,
-                a,
-                ror,
-                ci_lower,
-                ci_upper,
-            )
+                logger.debug(
+                    "    %s / %s [%s]: a=%d ROR=%.3f [%.3f, %.3f]",
+                    drug, reaction, cohort_name, a, ror, ci_lower, ci_upper,
+                )
 
     logger.info("FAERS reports generated: %d", len(reports))
     return reports

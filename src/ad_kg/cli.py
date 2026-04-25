@@ -150,7 +150,7 @@ def cmd_load(args: argparse.Namespace) -> None:
     from ad_kg.config import DATA_DIR, NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD  # noqa: PLC0415
     from ad_kg.models import Paper, Trial, EntityMention, GWASHit, FAERSReport  # noqa: PLC0415
     from ad_kg.graph.schema import apply_schema  # noqa: PLC0415
-    from ad_kg.graph.loader import load_graph, load_gwas, load_faers, load_trials  # noqa: PLC0415
+    from ad_kg.graph.loader import load_graph, load_gwas, load_faers, load_trials, seed_known_targets, consolidate_disease_nodes  # noqa: PLC0415
 
     logger.info("Connecting to Neo4j at %s", NEO4J_URI)
     driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
@@ -198,6 +198,8 @@ def cmd_load(args: argparse.Namespace) -> None:
         faers = [FAERSReport.from_dict(d) for d in json.loads(faers_path.read_text())]
         load_faers(driver, faers)
 
+    seed_known_targets(driver)
+    consolidate_disease_nodes(driver)
     driver.close()
     logger.info("Load complete.")
 

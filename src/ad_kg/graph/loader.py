@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 from typing import Any
 
@@ -241,13 +242,18 @@ def load_faers(driver: Any, reports: list[FAERSReport]) -> None:
                     drug_name=rpt.drug_name,
                 )
 
-                # Ensure FAERSReport node
-                reaction_id = f"{drug_id}_{rpt.reaction.lower().replace(' ', '_')}"
+                # Ensure FAERSReport node — ID includes cohort so each
+                # sub-population gets its own node for sensitivity queries.
+                reaction_id = (
+                    f"{drug_id}_{rpt.reaction.lower().replace(' ', '_')}"
+                    f"_{rpt.cohort}"
+                )
                 session.run(
                     "MERGE (f:FAERSReport {id: $rid}) "
                     "SET f.drug_name = $drug_name, f.reaction = $reaction, "
                     "    f.ror = $ror, f.ci_lower = $ci_lower, "
-                    "    f.ci_upper = $ci_upper, f.report_count = $report_count",
+                    "    f.ci_upper = $ci_upper, f.report_count = $report_count, "
+                    "    f.cohort = $cohort",
                     rid=reaction_id,
                     drug_name=rpt.drug_name,
                     reaction=rpt.reaction,
@@ -255,6 +261,7 @@ def load_faers(driver: Any, reports: list[FAERSReport]) -> None:
                     ci_lower=rpt.ci_lower,
                     ci_upper=rpt.ci_upper,
                     report_count=rpt.report_count,
+                    cohort=rpt.cohort,
                 )
 
                 # Drug → FAERSReport PROTECTIVE_SIGNAL (if ROR < 1)
@@ -302,16 +309,17 @@ def load_trials(driver: Any, trials: list[Trial]) -> None:
                     summary=trial.summary,
                 )
 
-                # Trial FOR Disease
+                # Trial FOR Disease — normalize condition name before creating the ID
+                # so HTML-encoded variants (Alzheimer&#39;s → Alzheimer's) map to one node
                 for condition in trial.conditions:
-                    cid = condition.lower().replace(" ", "_")
+                    cname, cid = _normalize_condition_name(condition)
                     session.run(
                         "MERGE (d:Disease {id: $cid}) SET d.name = $condition "
                         "WITH d "
                         "MATCH (t:Trial {id: $nct_id}) "
                         "MERGE (t)-[:FOR]->(d)",
                         cid=cid,
-                        condition=condition,
+                        condition=cname,
                         nct_id=trial.nct_id,
                     )
 
@@ -333,7 +341,135 @@ def load_trials(driver: Any, trials: list[Trial]) -> None:
     logger.info("Trials load complete.")
 
 
+def consolidate_disease_nodes(driver: Any) -> None:
+    """Merge fragmented Alzheimer disease node variants into one canonical node.
+
+    ClinicalTrials.gov returns HTML-encoded condition strings that the earlier
+    loader (pre-fix) stored verbatim, creating ~120 Disease nodes all meaning
+    "Alzheimer's disease". This function re-points all :FOR and :ASSOCIATED_WITH
+    edges to a single canonical node and deletes the orphaned variants.
+    """
+    canonical_id = "alzheimer's_disease"
+    canonical_name = "Alzheimer's disease"
+    logger.info("Consolidating Alzheimer disease node variants...")
+    with driver.session() as session:
+        # Ensure canonical node exists
+        session.run(
+            "MERGE (c:Disease {id: $cid}) SET c.name = $name",
+            cid=canonical_id,
+            name=canonical_name,
+        )
+        # Re-point Trial -[:FOR]-> variant  →  Trial -[:FOR]-> canonical
+        session.run(
+            "MATCH (canonical:Disease {id: $cid}) "
+            "MATCH (variant:Disease) "
+            "WHERE toLower(variant.id) CONTAINS 'alzheimer' "
+            "  AND variant.id <> $cid "
+            "MATCH (t:Trial)-[r:FOR]->(variant) "
+            "MERGE (t)-[:FOR]->(canonical) "
+            "DELETE r",
+            cid=canonical_id,
+        )
+        # Re-point SNP -[:ASSOCIATED_WITH]-> variant
+        result = session.run(
+            "MATCH (canonical:Disease {id: $cid}) "
+            "MATCH (variant:Disease) "
+            "WHERE toLower(variant.id) CONTAINS 'alzheimer' "
+            "  AND variant.id <> $cid "
+            "MATCH (s:SNP)-[r:ASSOCIATED_WITH]->(variant) "
+            "MERGE (s)-[r2:ASSOCIATED_WITH]->(canonical) "
+            "  ON CREATE SET r2 = properties(r) "
+            "DELETE r "
+            "RETURN count(r2) AS moved",
+            cid=canonical_id,
+        )
+        moved = result.single()
+        # Delete now-isolated variant nodes
+        result2 = session.run(
+            "MATCH (variant:Disease) "
+            "WHERE toLower(variant.id) CONTAINS 'alzheimer' "
+            "  AND variant.id <> $cid "
+            "  AND NOT (variant)--() "
+            "DELETE variant "
+            "RETURN count(variant) AS deleted",
+            cid=canonical_id,
+        )
+        deleted = result2.single()
+        logger.info(
+            "Disease consolidation complete: moved=%s deleted=%s",
+            moved["moved"] if moved else "?",
+            deleted["deleted"] if deleted else "?",
+        )
+
+
+def seed_known_targets(driver: Any) -> None:
+    """Assert ground-truth Drug→Gene TARGETS edges for well-established mechanisms.
+
+    The LLM relation extractor misses some canonical drug-gene pairs because
+    the relevant sentences aren't in the paper corpus. This function fills the
+    gaps so queries that traverse Drug-TARGETS-Gene paths work correctly for
+    all tracked drugs.
+    """
+    _KNOWN: list[tuple[str, str, str, str]] = [
+        # (drug_id, drug_name, gene_id, gene_symbol)
+        ("semaglutide",    "semaglutide",    "GLP1R", "GLP1R"),
+        ("liraglutide",    "liraglutide",    "GLP1R", "GLP1R"),
+        ("exenatide",      "exenatide",      "GLP1R", "GLP1R"),
+        ("dulaglutide",    "dulaglutide",    "GLP1R", "GLP1R"),
+        ("tirzepatide",    "tirzepatide",    "GLP1R", "GLP1R"),
+        ("tirzepatide",    "tirzepatide",    "GIPR",  "GIPR"),
+        ("canagliflozin",  "canagliflozin",  "SLC5A2", "SLC5A2"),
+        ("empagliflozin",  "empagliflozin",  "SLC5A2", "SLC5A2"),
+        ("dapagliflozin",  "dapagliflozin",  "SLC5A2", "SLC5A2"),
+        ("ertugliflozin",  "ertugliflozin",  "SLC5A2", "SLC5A2"),
+        ("metformin",      "metformin",      "PRKAA1", "PRKAA1"),
+        ("pioglitazone",   "pioglitazone",   "PPARG",  "PPARG"),
+    ]
+    logger.info("Seeding %d known drug→gene TARGETS edges", len(_KNOWN))
+    with driver.session() as session:
+        for drug_id, drug_name, gene_id, gene_symbol in _KNOWN:
+            try:
+                # Create canonical Drug + Gene nodes and the primary TARGETS edge
+                session.run(
+                    "MERGE (d:Drug {id: $drug_id}) SET d.name = $drug_name "
+                    "MERGE (g:Gene {id: $gene_id}) SET g.symbol = $gene_symbol "
+                    "MERGE (d)-[:TARGETS]->(g)",
+                    drug_id=drug_id,
+                    drug_name=drug_name,
+                    gene_id=gene_id,
+                    gene_symbol=gene_symbol,
+                )
+                # Also wire TARGETS for trial intervention Drug nodes whose id
+                # contains the canonical drug name (e.g., "semaglutide_(rybelsus®)").
+                # Excludes placebo nodes to avoid false positives.
+                session.run(
+                    "MATCH (variant:Drug) "
+                    "WHERE variant.id CONTAINS $drug_id "
+                    "  AND NOT variant.id STARTS WITH 'placebo' "
+                    "MATCH (g:Gene {id: $gene_id}) "
+                    "MERGE (variant)-[:TARGETS]->(g)",
+                    drug_id=drug_id,
+                    gene_id=gene_id,
+                )
+            except Exception as exc:
+                logger.warning("seed_known_targets failed for %s→%s: %s", drug_id, gene_id, exc)
+    logger.info("Seed complete.")
+
+
 # ── Utilities ─────────────────────────────────────────────────────────────────
+
+def _normalize_condition_name(raw: str) -> tuple[str, str]:
+    """Return (display_name, node_id) for a trial condition string.
+
+    Decodes HTML entities (including double-encoded variants like &amp;#39;)
+    and normalizes whitespace so equivalent strings share one Disease node.
+    """
+    # Two passes handle double-encoded entities: &amp;#39; → &#39; → '
+    name = html.unescape(html.unescape(raw.strip()))
+    name = " ".join(name.split())
+    node_id = name.lower().replace(" ", "_")
+    return name, node_id
+
 
 _GENE_ALIASES: dict[str, str] = {
     # GLP-1 axis

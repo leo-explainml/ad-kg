@@ -23,6 +23,7 @@ SCHEMA_CYPHER: list[str] = [
     "CREATE INDEX paper_pmid IF NOT EXISTS FOR (n:Paper) ON (n.pmid)",
     "CREATE INDEX trial_status IF NOT EXISTS FOR (n:Trial) ON (n.status)",
     "CREATE INDEX snp_rsid IF NOT EXISTS FOR (n:SNP) ON (n.rsid)",
+    "CREATE INDEX faers_cohort IF NOT EXISTS FOR (n:FAERSReport) ON (n.cohort)",
     # ── Full-text search index on Paper abstracts ─────────────────────────────
     (
         "CREATE FULLTEXT INDEX paper_abstract_ft IF NOT EXISTS "

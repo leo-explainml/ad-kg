@@ -13,7 +13,7 @@ from ad_kg.graph.queries import QUERIES, run_query
 # ── Query validity tests ───────────────────────────────────────────────────────
 
 def test_all_queries_present():
-    """All 11 named queries exist in the QUERIES dict."""
+    """All named queries exist in the QUERIES dict."""
     expected = {
         "whitespace_opportunity",
         "triple_convergence",
@@ -26,12 +26,15 @@ def test_all_queries_present():
         "open_trials_bridge_genes",
         "protective_drugs_ranked",
         "semaglutide_neighbors",
+        "faers_sensitivity_cohorts",
+        "faers_cross_reaction_consistency",
+        "faers_subpopulation_comparison",
     }
     assert set(QUERIES.keys()) == expected
 
 
 def test_all_queries_valid_syntax():
-    """All 11 queries are non-empty strings containing valid Cypher keywords."""
+    """All queries are non-empty strings containing valid Cypher keywords."""
     required_keywords = {"MATCH", "RETURN"}
     for name, cypher in QUERIES.items():
         assert isinstance(cypher, str), f"Query {name!r} is not a string"
@@ -42,8 +45,8 @@ def test_all_queries_valid_syntax():
 
 
 def test_all_queries_non_empty():
-    """QUERIES dict has 11 entries, all non-None."""
-    assert len(QUERIES) == 11
+    """QUERIES dict has 14 entries, all non-None."""
+    assert len(QUERIES) == 14
     for name, cypher in QUERIES.items():
         assert cypher is not None
         assert len(cypher) > 10
