@@ -66,9 +66,10 @@ def test_whitespace_opportunity_structure():
     # Must check for absence of trials
     assert "NOT EXISTS" in upper or "WHERE NOT" in upper
 
-    # Must return drug info
+    # Must return drug info with CI significance flag
     assert "RETURN" in upper
     assert "drug" in q.lower()
+    assert "signal_significant" in q.lower() or "ci_upper" in q.lower()
 
 
 def test_whitespace_opportunity_no_active_trial_filter():
@@ -85,6 +86,14 @@ def test_triple_convergence_three_signals():
     assert "PROTECTIVE_SIGNAL" in upper or "ror" in q.lower()
     assert "ASSOCIATED_WITH" in upper or "GWAS" in upper or "SNP" in upper
     assert "PAPER" in upper or "lit" in q.lower()
+
+
+def test_triple_convergence_excludes_net_adverse():
+    """triple_convergence filters out drugs with a significant overall adverse signal."""
+    q = QUERIES["triple_convergence"]
+    upper = q.upper()
+    assert "ADVERSE_SIGNAL" in upper
+    assert "CI_LOWER" in upper or "ci_lower" in q
 
 
 def test_bridge_genes_ranked_p_value():
@@ -199,11 +208,12 @@ def test_gwas_snp_to_drug_returns_path():
 
 
 def test_protective_drugs_ranked_orders_by_ror():
-    """protective_drugs_ranked orders by ROR ascending."""
+    """protective_drugs_ranked orders by ROR ascending and exposes CI significance."""
     q = QUERIES["protective_drugs_ranked"]
     upper = q.upper()
     assert "ORDER BY" in upper
     assert "ror" in q.lower()
+    assert "signal_significant" in q.lower() or "ci_upper" in q.lower()
 
 
 def test_open_trials_bridge_genes_active_status():

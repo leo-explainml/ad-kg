@@ -38,10 +38,18 @@ ORDER BY best_ror ASC
     # 2. Drugs with all three signals: FAERS protective + GWAS gene + literature.
     #    Includes metabolic GWAS traits (T2DM, BMI, insulin resistance) because
     #    GLP-1 drugs target GLP1R/GIPR which have metabolic — not direct AD — GWAS hits.
+    #    Excludes drugs with a statistically significant adverse overall signal
+    #    (ci_lower > 1.0, n >= 10) to avoid the semaglutide paradox — where a
+    #    non-significant protective Dementia signal coexists with net-adverse FAERS.
     "triple_convergence": """
 MATCH (d:Drug)-[:PROTECTIVE_SIGNAL]->(f:FAERSReport)
 WHERE f.cohort = 'all' AND f.ror < 1.0 AND f.report_count >= 2
 WITH d
+
+WHERE NOT EXISTS {
+  MATCH (d)-[:ADVERSE_SIGNAL]->(adv:FAERSReport)
+  WHERE adv.cohort = 'all' AND adv.ci_lower > 1.0 AND adv.report_count >= 10
+}
 
 MATCH (d)-[:TARGETS|RELATED_TO*1..2]->(g:Gene)<-[:LINKED_TO]-(s:SNP)
    -[:ASSOCIATED_WITH]->(dis:Disease)
@@ -84,9 +92,11 @@ LIMIT 50
 """.strip(),
 
     # 4. Drugs near GLP1R and cognitive biomarkers (repurposing candidates)
+    #    SLC5A2 (SGLT2) included: SGLT2i have no direct AD GWAS hits via this gene,
+    #    but their T2DM mechanism (glucose transport → insulin sensitivity) is relevant.
     "repurposing_candidates": """
 MATCH (d:Drug)-[:TARGETS|RELATED_TO*1..2]->(g:Gene)
-WHERE g.symbol IN ["GLP1R", "GIPR", "GCGR", "INSR", "IGF1R"]
+WHERE g.symbol IN ["GLP1R", "GIPR", "GCGR", "INSR", "IGF1R", "SLC5A2"]
 WITH d, collect(DISTINCT g.symbol) AS target_genes
 
 OPTIONAL MATCH (d)-[:PROTECTIVE_SIGNAL]->(f:FAERSReport)
@@ -208,19 +218,27 @@ LIMIT 50
     #     Anchored to cohort='all' so subpopulation-only protective signals
     #     (e.g. T2DM-only) do not inflate the ranking for drugs that are
     #     otherwise adverse in the general population.
+    #     best_ci_upper and signal_significant expose statistical quality so
+    #     small-n signals (tirzepatide Dementia n=2, ertugliflozin n=3) are
+    #     visibly distinguished from robust signals (liraglutide CI entirely < 1).
     "protective_drugs_ranked": """
 MATCH (d:Drug)-[:PROTECTIVE_SIGNAL]->(f:FAERSReport)
 WHERE f.cohort = 'all' AND f.report_count >= 2
-WITH d, min(f.ror) AS min_ror, count(DISTINCT f) AS protective_reactions
+WITH d,
+     round(min(f.ror), 3)      AS best_ror,
+     round(min(f.ci_upper), 3) AS best_ci_upper,
+     count(DISTINCT f)         AS protective_reactions
 
 OPTIONAL MATCH (d)-[:MENTIONS|RELATED_TO*1..2]-(p:Paper)
-WITH d, min_ror, protective_reactions, count(DISTINCT p) AS lit_count
+WITH d, best_ror, best_ci_upper, protective_reactions, count(DISTINCT p) AS lit_count
 
 RETURN d.name AS drug,
-       min_ror AS best_ror,
+       best_ror,
+       best_ci_upper,
+       best_ci_upper < 1.0     AS signal_significant,
        protective_reactions,
        lit_count AS literature_mentions
-ORDER BY min_ror ASC, lit_count DESC
+ORDER BY best_ror ASC, lit_count DESC
 """.strip(),
 
     # 12. FAERS ROR across all cohorts for drugs with a baseline protective signal.

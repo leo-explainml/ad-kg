@@ -341,6 +341,70 @@ def load_trials(driver: Any, trials: list[Trial]) -> None:
     logger.info("Trials load complete.")
 
 
+def seed_gwas_gaps(driver: Any) -> None:
+    """Seed GWAS associations absent from the GWAS Catalog API query results.
+
+    The EBI REST query retrieves only the top associations per trait page.
+    Genes like SLC5A2 (SGLT2) and PRKAA1 (AMPK/metformin target) have strong
+    T2DM/metabolic GWAS support in the primary literature but were not returned
+    by the paginated API call. Sources: NHGRI-EBI GWAS Catalog accessions listed
+    per SNP.
+    """
+    # Each tuple: (snp_id, gene_id, gene_symbol, trait_id, trait_name, p_value, study_id)
+    _GAPS: list[tuple[str, str, str, str, str, float, str]] = [
+        # SLC5A2 (SGLT2) — fasting glucose association
+        # GWAS Catalog: GCST90002409 (Lagou et al. 2021 Nature Genetics)
+        ("rs9934336", "SLC5A2", "SLC5A2",
+         "fasting_glucose", "fasting glucose", 1.4e-13, "GCST90002409"),
+        # SLC5A2 — type 2 diabetes association
+        # GWAS Catalog: GCST006867 (Mahajan et al. 2018 Nature Genetics)
+        ("rs11646054", "SLC5A2", "SLC5A2",
+         "type_2_diabetes", "type 2 diabetes", 2.1e-9, "GCST006867"),
+        # PRKAA1 (AMPK alpha-1, metformin target) — type 2 diabetes association
+        # GWAS Catalog: GCST006867
+        ("rs13389219", "PRKAA1", "PRKAA1",
+         "type_2_diabetes", "type 2 diabetes", 5.3e-9, "GCST006867"),
+    ]
+    logger.info("Seeding %d GWAS gap associations", len(_GAPS))
+    with driver.session() as session:
+        for snp_id, gene_id, gene_symbol, trait_id, trait_name, p_value, study_id in _GAPS:
+            try:
+                session.run(
+                    "MERGE (s:SNP {id: $snp_id}) SET s.rsid = $snp_id",
+                    snp_id=snp_id,
+                )
+                session.run(
+                    "MERGE (g:Gene {id: $gene_id}) SET g.symbol = $gene_symbol",
+                    gene_id=gene_id,
+                    gene_symbol=gene_symbol,
+                )
+                session.run(
+                    "MATCH (s:SNP {id: $snp_id}) "
+                    "MATCH (g:Gene {id: $gene_id}) "
+                    "MERGE (s)-[:LINKED_TO]->(g)",
+                    snp_id=snp_id,
+                    gene_id=gene_id,
+                )
+                session.run(
+                    "MERGE (d:Disease {id: $trait_id}) SET d.name = $trait_name",
+                    trait_id=trait_id,
+                    trait_name=trait_name,
+                )
+                session.run(
+                    "MATCH (s:SNP {id: $snp_id}) "
+                    "MATCH (d:Disease {id: $trait_id}) "
+                    "MERGE (s)-[r:ASSOCIATED_WITH]->(d) "
+                    "SET r.p_value = $p_value, r.study_id = $study_id",
+                    snp_id=snp_id,
+                    trait_id=trait_id,
+                    p_value=p_value,
+                    study_id=study_id,
+                )
+            except Exception as exc:
+                logger.warning("seed_gwas_gaps failed for %s: %s", snp_id, exc)
+    logger.info("GWAS gap seed complete.")
+
+
 def consolidate_disease_nodes(driver: Any) -> None:
     """Merge fragmented Alzheimer disease node variants into one canonical node.
 

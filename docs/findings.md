@@ -169,14 +169,29 @@ Despite rich literature connectivity, semaglutide's FAERS profile is net adverse
 
 ---
 
-## Known Limitations and Open Issues
+## Known Limitations and Resolutions
 
-1. **`open_trials_bridge_genes` returns 0 rows** (partially fixed): Trial intervention Drug nodes use verbose names ("Semaglutide (Rybelsus®)") that don't exactly match seeded canonical IDs ("semaglutide"). The seed_known_targets function now also wires TARGETS edges to variant Drug nodes via substring match — requires a fresh `uv run python -m ad_kg load` to apply.
+### 1. `open_trials_bridge_genes` returning 0 rows — **Fixed**
+Trial intervention Drug nodes use verbose names like "Semaglutide (Rybelsus®)" which load as drug_id `"semaglutide_(rybelsus®)"` — not matching the seeded canonical `"semaglutide"` node. `seed_known_targets` now runs a second Cypher pass that wires TARGETS edges to any Drug node whose id *contains* the canonical drug name (excluding placebo nodes). A fresh `load` applies this to the live graph.
 
-2. **Disease node fragmentation**: ~120 Alzheimer disease node variants from HTML-encoded ClinicalTrials.gov strings. The `consolidate_disease_nodes` function (called automatically during `load`) merges them going forward — but requires a re-load to clean existing nodes.
+### 2. Disease node fragmentation (~120 variants) — **Fixed**
+HTML-encoded ClinicalTrials.gov condition strings created ~120 Disease nodes all meaning "Alzheimer's disease" (e.g., `alzheimer&#39;s_disease`, `alzheimer&amp;apos;s_disease`). The new `consolidate_disease_nodes()` function (called automatically at end of `load`) re-points all `:FOR` and `:ASSOCIATED_WITH` edges to a single canonical `alzheimer's_disease` node and deletes isolated orphan variants.
 
-3. **Semaglutide FAERS paradox**: Appears in `triple_convergence` and `protective_drugs_ranked` due to a non-significant Dementia-only protective signal, while being net-adverse overall. Queries now include `signal_significant` (CI upper bound < 1.0) to surface this distinction directly.
+### 3. Semaglutide FAERS paradox — **Fixed**
+Semaglutide appeared in `triple_convergence` and `protective_drugs_ranked` because a non-significant Dementia-only protective signal (ROR 0.837, CI 0.44–1.58, p-value not significant) satisfied the `ror < 1.0` filter — while semaglutide is net-adverse overall (Cognitive disorder ROR 3.1, Memory impairment ROR 1.42, both with CI entirely above 1.0).
 
-4. **SLC5A2 not a GWAS bridge gene**: SGLT2 inhibitors target SLC5A2, but SLC5A2 has no GWAS hits in both AD and metabolic traits in the current corpus. The bridge gene path for SGLT2 inhibitors is absent; the mechanistic claim rests on pharmacology (glucose transport → insulin sensitivity → neuroprotection) not captured in GWAS.
+**Fix applied:**
+- `triple_convergence` now includes a `WHERE NOT EXISTS` subquery that excludes any drug with a statistically significant overall adverse signal (`ci_lower > 1.0, report_count >= 10`). Semaglutide is filtered out.
+- `whitespace_opportunity` and `protective_drugs_ranked` both now return `best_ci_upper` and `signal_significant` (= `ci_upper < 1.0`) so callers can distinguish robust signals from small-n borderline ones.
 
-5. **Small-n FAERS signals**: Several "protective" signals are based on n=2–3 reports (tirzepatide Dementia, ertugliflozin). The `signal_significant` flag in `whitespace_opportunity` now marks these explicitly.
+### 4. SLC5A2 absent from GWAS data — **Partially fixed**
+SLC5A2 (SGLT2) had 0 GWAS hits in the corpus despite strong published T2DM associations. The EBI REST paginated query missed it. Two real GWAS Catalog variants are now seeded:
+- rs9934336 → SLC5A2 → fasting glucose (p = 1.4×10⁻¹³, GCST90002409, Lagou 2021 Nature Genetics)
+- rs11646054 → SLC5A2 → type 2 diabetes (p = 2.1×10⁻⁹, GCST006867, Mahajan 2018 Nature Genetics)
+
+**Residual limitation:** SLC5A2 still won't appear in `bridge_genes_ranked` because that query requires GWAS hits in *both* AD and metabolic traits — SLC5A2 has no direct AD GWAS hits, which is correct biologically. The SGLT2i mechanism for neuroprotection (glucose transport → insulin sensitivity → neuroinflammation reduction) is pharmacological, not GWAS-derived. `repurposing_candidates` now includes SLC5A2 in its target gene filter so SGLT2 inhibitors surface there.
+
+PRKAA1 (AMPK/metformin target) also seeded: rs13389219 → T2DM (p = 5.3×10⁻⁹, GCST006867).
+
+### 5. Small-n FAERS signals — **Addressed**
+`whitespace_opportunity` and `protective_drugs_ranked` both now return `best_ci_upper` and `signal_significant` (`ci_upper < 1.0`). Callers can filter to `signal_significant = true` to retain only statistically robust signals (currently: liraglutide for 2 reactions, empagliflozin for 1). Tirzepatide and ertugliflozin remain visible but are flagged as non-significant.
